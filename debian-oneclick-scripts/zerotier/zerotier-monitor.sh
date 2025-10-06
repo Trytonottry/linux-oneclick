@@ -1,0 +1,193 @@
+#!/bin/bash
+
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+
+CHECK_MARK="✅"
+CROSS_MARK="❌"
+WIFI_ICON="📶"
+SERVER_ICON="🖥️"
+NETWORK_ICON="🌐"
+ERROR_ICON="⚠️"
+SMART_DEVICE_ICON="🤖"
+
+
+ROUTER_URL="http://router.lan"
+ROUTER_USER="admin"
+ROUTER_PASS="admin"
+WIRELESS_ENDPOINT="/rest/interface/wireless/registration-table"
+DHCP_LEASES_ENDPOINT="/rest/ip/dhcp-server/lease"
+
+
+hosts=(
+    "xxx.vakarian.website:22"
+    "yyy.vakarian.website:22" 
+    "zero.lan:22"
+    "zzz.lan:22"
+)
+
+
+check_ssh_port() {
+    local host_port=$1
+    local host=${host_port%:*}
+    local port=${host_port#*:}
+    local timeout=5
+
+    if nc -z -w "$timeout" "$host" "$port" &> /dev/null; then
+        echo -e "${GREEN}${CHECK_MARK} $host:$port - ${GREEN}Host online${NC}"
+        return 0
+    else
+        echo -e "${RED}${CROSS_MARK} $host:$port - ${RED}Host offline${NC}"
+        return 1
+    fi
+}
+
+get_wireless_clients() {
+    echo -e "\n${CYAN}${WIFI_ICON} Fetching wireless clients...${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════${NC}"
+
+    response=$(curl -s -u "$ROUTER_USER:$ROUTER_PASS" "$ROUTER_URL$WIRELESS_ENDPOINT" 2>/dev/null)
+
+    if [ $? -ne 0 ] || [ -z "$response" ]; then
+        echo -e "${RED}${ERROR_ICON} Error: No connection to router.lan${NC}"
+        return 1
+    fi
+
+    if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+        echo -e "${RED}${ERROR_ICON} Error: JSON parsing failed${NC}"
+        return 1
+    fi
+
+    local client_count=$(echo "$response" | jq -r 'length')
+    if [ "$client_count" -eq 0 ]; then
+        echo -e "${YELLOW}${WIFI_ICON} No wireless clients connected${NC}"
+        return 0
+    fi
+
+    echo -e "${CYAN}MAC Address         Last IP         Interface${NC}"
+    echo -e "${CYAN}────────────────── ─────────────── ──────────${NC}"
+
+    echo "$response" | jq -r '.[] | "\(."mac-address") \(."last-ip") \(.interface)"' | \
+    while read -r mac ip interface; do
+        printf "%-18s %-15s %s\n" "$mac" "${ip:-N/A}" "$interface"
+    done | sort
+
+    echo -e "${CYAN}Total wireless clients: ${GREEN}$client_count${NC}"
+}
+
+get_smart_devices() {
+    echo -e "\n${CYAN}${SMART_DEVICE_ICON} Fetching smart devices...${NC}"
+    echo -e "${BLUE}═══════════════════════════════════${NC}"
+
+    response=$(curl -s -u "$ROUTER_USER:$ROUTER_PASS" "$ROUTER_URL$DHCP_LEASES_ENDPOINT" 2>/dev/null)
+
+    if [ $? -ne 0 ] || [ -z "$response" ]; then
+        echo -e "${RED}${ERROR_ICON} Error: No connection to router.lan${NC}"
+        return 1
+    fi
+
+    if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+        echo -e "${RED}${ERROR_ICON} Error: JSON parsing failed${NC}"
+        return 1
+    fi
+
+    echo "$response" | jq -r '.[] | select(.comment != null and .comment != "") | "\(.comment)|\(.address)|\(.status)"' > /tmp/smart_devices.tmp
+
+    local device_count=$(wc -l < /tmp/smart_devices.tmp 2>/dev/null || echo 0)
+
+    if [ "$device_count" -eq 0 ]; then
+        echo -e "${YELLOW}${SMART_DEVICE_ICON} No smart devices found with comments${NC}"
+        rm -f /tmp/smart_devices.tmp
+        return 0
+    fi
+
+    echo -e "${CYAN}Device Name               IP Address     Status${NC}"
+    echo -e "${CYAN}──────────────────────── ─────────────── ───────${NC}"
+
+    while IFS='|' read -r name ip status; do
+        local status_color=$GREEN
+        if [ "$status" == "bound" ] || [ "$status" == "active" ]; then
+            status_color=$GREEN
+        elif [ "$status" == "waiting" ] || [ "$status" == "offline" ]; then
+            status_color=$YELLOW
+        else
+            status_color=$RED
+        fi
+
+        local display_name="$name"
+        if [ ${#name} -gt 25 ]; then
+            display_name="${name:0:22}..."
+        fi
+
+        printf "%-25s %-15s ${status_color}%-10s${NC}\n" "$display_name" "$ip" "$status"
+    done < /tmp/smart_devices.tmp | sort
+
+    echo -e "${CYAN}Total smart devices: ${GREEN}$device_count${NC}"
+
+    rm -f /tmp/smart_devices.tmp
+}
+
+echo -e "\n${BLUE}${NETWORK_ICON} NETWORK MONITORING ${NETWORK_ICON}${NC}"
+echo -e "${BLUE}═══════════════════════════${NC}"
+
+echo -e "\n${CYAN}${SERVER_ICON} Checking remote hosts access...${NC}"
+echo -e "${BLUE}═══════════════════════════════════${NC}"
+
+available=0
+unavailable=0
+
+for host_port in "${hosts[@]}"; do
+    if check_ssh_port "$host_port"; then
+        ((available++))
+    else
+        ((unavailable++))
+    fi
+done
+
+echo -e "${BLUE}═══════════════════════════════════${NC}"
+echo -e "${CYAN}Hosts Status Summary:${NC}"
+echo -e "  ${GREEN}${CHECK_MARK} Online:  $available${NC}"
+echo -e "  ${RED}${CROSS_MARK} Offline: $unavailable${NC}"
+echo -e "  ${CYAN}📊 Total:    ${#hosts[@]}${NC}"
+
+get_wireless_clients
+get_smart_devices
+
+echo -e "\n${BLUE}${NETWORK_ICON} SUMMARY MONITORING ${NETWORK_ICON}${NC}"
+echo -e "${BLUE}═════════════════════════════${NC}"
+
+wireless_response=$(curl -s -u "$ROUTER_USER:$ROUTER_PASS" "$ROUTER_URL$WIRELESS_ENDPOINT" 2>/dev/null)
+wireless_count=0
+if [ $? -eq 0 ] && [ -n "$wireless_response" ] && echo "$wireless_response" | jq -e . >/dev/null 2>&1; then
+    wireless_count=$(echo "$wireless_response" | jq -r 'length')
+fi
+
+smart_devices_response=$(curl -s -u "$ROUTER_USER:$ROUTER_PASS" "$ROUTER_URL$DHCP_LEASES_ENDPOINT" 2>/dev/null)
+smart_devices_count=0
+if [ $? -eq 0 ] && [ -n "$smart_devices_response" ] && echo "$smart_devices_response" | jq -e . >/dev/null 2>&1; then
+    smart_devices_count=$(echo "$smart_devices_response" | jq -r '[.[] | select(.comment != null and .comment != "")] | length')
+fi
+
+echo -e "${CYAN}${SERVER_ICON} Hosts:${NC} ${GREEN}$available/${#hosts[@]}${NC} available"
+echo -e "${CYAN}${WIFI_ICON} Wireless:${NC} ${GREEN}$wireless_count${NC} devices connected"
+echo -e "${CYAN}${SMART_DEVICE_ICON} Smart Devices:${NC} ${GREEN}$smart_devices_count${NC} devices with comments"
+
+if [ $unavailable -eq 0 ]; then
+    echo -e "\n${GREEN}${CHECK_MARK} System status: ${GREEN}HEALTHY${NC}"
+else
+    echo -e "\n${YELLOW}${ERROR_ICON} System status: ${YELLOW}DEGRADED${NC}"
+    echo -e "${YELLOW}Some hosts are unreachable${NC}"
+fi
+
+if [ $unavailable -eq 0 ]; then
+    exit 0
+else
+    exit 1
+fi
